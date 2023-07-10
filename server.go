@@ -278,9 +278,6 @@ func (s *Server) recv(c *net.UDPConn) {
 
 // parsePacket is used to parse an incoming packet
 func (s *Server) parsePacket(packet []byte, from net.Addr) error {
-	if from.String() != "192.168.56.101:5353" {
-		return nil
-	}
 	log.Println("Received packet")
 	var msg dns.Msg
 	if err := msg.Unpack(packet); err != nil {
