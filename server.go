@@ -3,12 +3,10 @@ package bonjour
 import (
 	"fmt"
 	"log"
-	"math/rand"
 	"net"
 	"os"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/miekg/dns"
 	"golang.org/x/net/ipv4"
@@ -280,6 +278,10 @@ func (s *Server) recv(c *net.UDPConn) {
 
 // parsePacket is used to parse an incoming packet
 func (s *Server) parsePacket(packet []byte, from net.Addr) error {
+	if from.String() != "192.168.56.101:5353" {
+		return nil
+	}
+	log.Println("Received packet")
 	var msg dns.Msg
 	if err := msg.Unpack(packet); err != nil {
 		log.Printf("[ERR] bonjour: Failed to unpack packet: %v", err)
@@ -288,8 +290,30 @@ func (s *Server) parsePacket(packet []byte, from net.Addr) error {
 	return s.handleQuery(&msg, from)
 }
 
+// handleQuestion is used to handle an incoming question
+func (s *Server) handleQuestion(q dns.Question, resp *dns.Msg) error {
+	if s.service == nil {
+		return nil
+	}
+	log.Println("HANDLE QUESTION", q.Name)
+	switch q.Name {
+	case s.service.ServiceName():
+		log.Println("Compose browsing", q.Name)
+		s.composeBrowsingAnswers(resp, s.ttl)
+	case s.service.ServiceInstanceName():
+		log.Println("Compose lookup", q.Name)
+		s.composeLookupAnswers(resp, s.ttl)
+	case s.service.ServiceTypeName():
+		log.Println("No compose - name", q.Name)
+		s.serviceTypeName(resp, s.ttl)
+	}
+
+	return nil
+}
+
 // handleQuery is used to handle an incoming query
 func (s *Server) handleQuery(query *dns.Msg, from net.Addr) error {
+	log.Println("handleQuery packet")
 	// Ignore answer for now
 	if len(query.Answer) > 0 {
 		return nil
@@ -307,7 +331,8 @@ func (s *Server) handleQuery(query *dns.Msg, from net.Addr) error {
 	if len(query.Question) > 0 {
 		for _, q := range query.Question {
 			resp = dns.Msg{}
-			resp.SetReply(query)
+			//resp.SetReply(query)
+			resp.MsgHdr.Response = true
 			resp.Answer = []dns.RR{}
 			resp.Extra = []dns.RR{}
 			if err = s.handleQuestion(q, &resp); err != nil {
@@ -316,18 +341,23 @@ func (s *Server) handleQuery(query *dns.Msg, from net.Addr) error {
 				continue
 			}
 			// Check if there is an answer
+			log.Println("answer?")
 			if len(resp.Answer) > 0 {
 				if isUnicastQuestion(q) {
+					log.Println("Sending unicast response")
 					// Send unicast
 					if e := s.unicastResponse(&resp, from); e != nil {
 						err = e
 					}
 				} else {
 					// Send mulicast
+					log.Println("Sending multicast response")
 					if e := s.multicastResponse(&resp); e != nil {
 						err = e
 					}
 				}
+			} else {
+				log.Println("No answer")
 			}
 		}
 	}
@@ -335,25 +365,8 @@ func (s *Server) handleQuery(query *dns.Msg, from net.Addr) error {
 	return err
 }
 
-// handleQuestion is used to handle an incoming question
-func (s *Server) handleQuestion(q dns.Question, resp *dns.Msg) error {
-	if s.service == nil {
-		return nil
-	}
-
-	switch q.Name {
-	case s.service.ServiceName():
-		s.composeBrowsingAnswers(resp, s.ttl)
-	case s.service.ServiceInstanceName():
-		s.composeLookupAnswers(resp, s.ttl)
-	case s.service.ServiceTypeName():
-		s.serviceTypeName(resp, s.ttl)
-	}
-
-	return nil
-}
-
 func (s *Server) composeBrowsingAnswers(resp *dns.Msg, ttl uint32) {
+	log.Println("composeBrowsingAnswers")
 	ptr := &dns.PTR{
 		Hdr: dns.RR_Header{
 			Name:   s.service.ServiceName(),
@@ -363,7 +376,6 @@ func (s *Server) composeBrowsingAnswers(resp *dns.Msg, ttl uint32) {
 		},
 		Ptr: s.service.ServiceInstanceName(),
 	}
-	resp.Answer = append(resp.Answer, ptr)
 
 	txt := &dns.TXT{
 		Hdr: dns.RR_Header{
@@ -386,7 +398,8 @@ func (s *Server) composeBrowsingAnswers(resp *dns.Msg, ttl uint32) {
 		Port:     uint16(s.service.Port),
 		Target:   s.service.HostName,
 	}
-	resp.Extra = append(resp.Extra, srv, txt)
+	resp.Answer = append(resp.Answer, srv, txt, ptr)
+	//resp.Extra = append(resp.Extra, srv, txt)
 
 	if s.service.AddrIPv4 != nil {
 		a := &dns.A{
@@ -510,42 +523,42 @@ func (s *Server) serviceTypeName(resp *dns.Msg, ttl uint32) {
 }
 
 // Perform probing & announcement
-//TODO: implement a proper probing & conflict resolution
+// TODO: implement a proper probing & conflict resolution
 func (s *Server) probe() {
-	q := new(dns.Msg)
-	q.SetQuestion(s.service.ServiceInstanceName(), dns.TypePTR)
-	q.RecursionDesired = false
+	// q := new(dns.Msg)
+	// q.SetQuestion(s.service.ServiceInstanceName(), dns.TypePTR)
+	// q.RecursionDesired = false
 
-	srv := &dns.SRV{
-		Hdr: dns.RR_Header{
-			Name:   s.service.ServiceInstanceName(),
-			Rrtype: dns.TypeSRV,
-			Class:  dns.ClassINET,
-			Ttl:    s.ttl,
-		},
-		Priority: 0,
-		Weight:   0,
-		Port:     uint16(s.service.Port),
-		Target:   s.service.HostName,
-	}
-	txt := &dns.TXT{
-		Hdr: dns.RR_Header{
-			Name:   s.service.ServiceInstanceName(),
-			Rrtype: dns.TypeTXT,
-			Class:  dns.ClassINET,
-			Ttl:    s.ttl,
-		},
-		Txt: s.service.Text,
-	}
-	q.Ns = []dns.RR{srv, txt}
+	// srv := &dns.SRV{
+	// 	Hdr: dns.RR_Header{
+	// 		Name:   s.service.ServiceInstanceName(),
+	// 		Rrtype: dns.TypeSRV,
+	// 		Class:  dns.ClassINET,
+	// 		Ttl:    s.ttl,
+	// 	},
+	// 	Priority: 0,
+	// 	Weight:   0,
+	// 	Port:     uint16(s.service.Port),
+	// 	Target:   s.service.HostName,
+	// }
+	// txt := &dns.TXT{
+	// 	Hdr: dns.RR_Header{
+	// 		Name:   s.service.ServiceInstanceName(),
+	// 		Rrtype: dns.TypeTXT,
+	// 		Class:  dns.ClassINET,
+	// 		Ttl:    s.ttl,
+	// 	},
+	// 	Txt: s.service.Text,
+	// }
+	// q.Ns = []dns.RR{srv, txt}
 
-	randomizer := rand.New(rand.NewSource(time.Now().UnixNano()))
-	for i := 0; i < 3; i++ {
-		if err := s.multicastResponse(q); err != nil {
-			log.Println("[ERR] bonjour: failed to send probe:", err.Error())
-		}
-		time.Sleep(time.Duration(randomizer.Intn(250)) * time.Millisecond)
-	}
+	// randomizer := rand.New(rand.NewSource(time.Now().UnixNano()))
+	// for i := 0; i < 3; i++ {
+	// 	// if err := s.multicastResponse(q); err != nil {
+	// 	// 	log.Println("[ERR] bonjour: failed to send probe:", err.Error())
+	// 	// }
+	// 	time.Sleep(time.Duration(randomizer.Intn(250)) * time.Millisecond)
+	// }
 	resp := new(dns.Msg)
 	resp.MsgHdr.Response = true
 	resp.Answer = []dns.RR{}
@@ -558,14 +571,16 @@ func (s *Server) probe() {
 	//    packet loss, a responder MAY send up to eight unsolicited responses,
 	//    provided that the interval between unsolicited responses increases by
 	//    at least a factor of two with every response sent.
-	timeout := 1 * time.Second
-	for i := 0; i < 3; i++ {
-		if err := s.multicastResponse(resp); err != nil {
-			log.Println("[ERR] bonjour: failed to send announcement:", err.Error())
-		}
-		time.Sleep(timeout)
-		timeout *= 2
-	}
+	// timeout := 1 * time.Second
+	// for i := 0; i < 3; i++ {
+
+	///THIS WORKS
+	// if err := s.multicastResponse(resp); err != nil {
+	// 	log.Println("[ERR] bonjour: failed to send announcement:", err.Error())
+	// }
+	// time.Sleep(timeout)
+	// timeout *= 2
+	//}
 }
 
 // announceText sends a Text announcement with cache flush enabled
@@ -584,7 +599,7 @@ func (s *Server) announceText() {
 	}
 
 	resp.Answer = []dns.RR{txt}
-	s.multicastResponse(resp)
+	// s.multicastResponse(resp)
 }
 
 func (s *Server) unregister() error {
@@ -593,7 +608,8 @@ func (s *Server) unregister() error {
 	resp.Answer = []dns.RR{}
 	resp.Extra = []dns.RR{}
 	s.composeLookupAnswers(resp, 0)
-	return s.multicastResponse(resp)
+	// return s.multicastResponse(resp)
+	return nil
 }
 
 // unicastResponse is used to send a unicast response packet
@@ -620,6 +636,7 @@ func (c *Server) multicastResponse(msg *dns.Msg) error {
 		return err
 	}
 	if c.ipv4conn != nil {
+		log.Println("Sending IPv4 multicast response")
 		c.ipv4conn.WriteTo(buf, ipv4Addr)
 	}
 	if c.ipv6conn != nil {
